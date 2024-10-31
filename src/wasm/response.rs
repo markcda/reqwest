@@ -1,5 +1,4 @@
 use std::fmt;
-use std::io::Read;
 
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
@@ -94,15 +93,6 @@ impl Response {
         let full = self.bytes().await?;
 
         serde_json::from_slice(&full).map_err(crate::error::decode)
-    }
-
-    /// Try to deserialize the response body as MessagePack.
-    #[cfg(feature = "msgpack")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "msgpack")))]
-    pub async fn msgpack<T: DeserializeOwned>(self) -> crate::Result<T> {
-        let full = self.bytes().await?;
-
-        rmp_serde::from_slice(&full).map_err(crate::error::decode)
     }
 
     /// Get the response text.
