@@ -309,6 +309,9 @@ impl RequestBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// In additional the request's body, the Content-Type and Content-Length fields are
+    /// appropriately set.
     #[cfg(feature = "multipart")]
     #[cfg_attr(docsrs, doc(cfg(feature = "multipart")))]
     pub fn multipart(self, mut multipart: multipart::Form) -> RequestBuilder {
@@ -443,38 +446,6 @@ impl RequestBuilder {
                     if !req.headers().contains_key(CONTENT_TYPE) {
                         req.headers_mut()
                             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                    }
-                    *req.body_mut() = Some(body.into());
-                }
-                Err(err) => error = Some(crate::error::builder(err)),
-            }
-        }
-        if let Some(err) = error {
-            self.request = Err(err);
-        }
-        self
-    }
-
-    /// Send a MessagePack body.
-    ///
-    /// # Optional
-    ///
-    /// This requires the optional `msgpack` feature enabled.
-    ///
-    /// # Errors
-    ///
-    /// Serialization can fail if `T`'s implementation of `Serialize` decides to
-    /// fail, or if `T` contains a map with non-string keys.
-    #[cfg(feature = "msgpack")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "msgpack")))]
-    pub fn msgpack<T: Serialize + ?Sized>(mut self, msgpack: &T) -> RequestBuilder {
-        let mut error = None;
-        if let Ok(ref mut req) = self.request {
-            match rmp_serde::to_vec(msgpack) {
-                Ok(body) => {
-                    if !req.headers().contains_key(CONTENT_TYPE) {
-                        req.headers_mut()
-                          .insert(CONTENT_TYPE, HeaderValue::from_static("application/msgpack"));
                     }
                     *req.body_mut() = Some(body.into());
                 }

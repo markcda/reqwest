@@ -39,6 +39,8 @@ use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolv
 use crate::error;
 use crate::into_url::try_uri;
 use crate::redirect::{self, remove_sensitive_headers};
+#[cfg(feature = "__rustls")]
+use crate::tls::CertificateRevocationList;
 #[cfg(feature = "__tls")]
 use crate::tls::{self, TlsBackend};
 #[cfg(feature = "__tls")]
@@ -91,7 +93,7 @@ struct Config {
     // NOTE: When adding a new field, update `fmt::Debug for ClientBuilder`
     accepts: Accepts,
     headers: HeaderMap,
-    #[cfg(feature = "native-tls")]
+    #[cfg(feature = "__tls")]
     hostname_verification: bool,
     #[cfg(feature = "__tls")]
     certs_verification: bool,
@@ -114,10 +116,12 @@ struct Config {
     root_certs: Vec<Certificate>,
     #[cfg(feature = "__tls")]
     tls_built_in_root_certs: bool,
-    #[cfg(feature = "rustls-tls-webpki-roots")]
+    #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
     tls_built_in_certs_webpki: bool,
-    #[cfg(feature = "rustls-tls-native-roots")]
+    #[cfg(feature = "rustls-tls-native-roots-no-provider")]
     tls_built_in_certs_native: bool,
+    #[cfg(feature = "__rustls")]
+    crls: Vec<CertificateRevocationList>,
     #[cfg(feature = "__tls")]
     min_tls_version: Option<tls::Version>,
     #[cfg(feature = "__tls")]
@@ -140,6 +144,8 @@ struct Config {
     http2_adaptive_window: bool,
     #[cfg(feature = "http2")]
     http2_max_frame_size: Option<u32>,
+    #[cfg(feature = "http2")]
+    http2_max_header_list_size: Option<u32>,
     #[cfg(feature = "http2")]
     http2_keep_alive_interval: Option<Duration>,
     #[cfg(feature = "http2")]
@@ -188,7 +194,7 @@ impl ClientBuilder {
                 error: None,
                 accepts: Accepts::default(),
                 headers,
-                #[cfg(feature = "native-tls")]
+                #[cfg(feature = "__tls")]
                 hostname_verification: true,
                 #[cfg(feature = "__tls")]
                 certs_verification: true,
@@ -211,12 +217,14 @@ impl ClientBuilder {
                 root_certs: Vec::new(),
                 #[cfg(feature = "__tls")]
                 tls_built_in_root_certs: true,
-                #[cfg(feature = "rustls-tls-webpki-roots")]
+                #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
                 tls_built_in_certs_webpki: true,
-                #[cfg(feature = "rustls-tls-native-roots")]
+                #[cfg(feature = "rustls-tls-native-roots-no-provider")]
                 tls_built_in_certs_native: true,
                 #[cfg(any(feature = "native-tls", feature = "__rustls"))]
                 identity: None,
+                #[cfg(feature = "__rustls")]
+                crls: vec![],
                 #[cfg(feature = "__tls")]
                 min_tls_version: None,
                 #[cfg(feature = "__tls")]
@@ -239,6 +247,8 @@ impl ClientBuilder {
                 http2_adaptive_window: false,
                 #[cfg(feature = "http2")]
                 http2_max_frame_size: None,
+                #[cfg(feature = "http2")]
+                http2_max_header_list_size: None,
                 #[cfg(feature = "http2")]
                 http2_keep_alive_interval: None,
                 #[cfg(feature = "http2")]
@@ -388,10 +398,7 @@ impl ClientBuilder {
                         }
                     }
 
-                    #[cfg(feature = "native-tls")]
-                    {
-                        tls.danger_accept_invalid_hostnames(!config.hostname_verification);
-                    }
+                    tls.danger_accept_invalid_hostnames(!config.hostname_verification);
 
                     tls.danger_accept_invalid_certs(!config.certs_verification);
 
@@ -500,7 +507,7 @@ impl ClientBuilder {
                 }
                 #[cfg(feature = "__rustls")]
                 TlsBackend::Rustls => {
-                    use crate::tls::NoVerifier;
+                    use crate::tls::{IgnoreHostname, NoVerifier};
 
                     // Set root certificates.
                     let mut root_cert_store = rustls::RootCertStore::empty();
@@ -508,18 +515,18 @@ impl ClientBuilder {
                         cert.add_to_rustls(&mut root_cert_store)?;
                     }
 
-                    #[cfg(feature = "rustls-tls-webpki-roots")]
+                    #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
                     if config.tls_built_in_certs_webpki {
                         root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                     }
 
-                    #[cfg(feature = "rustls-tls-native-roots")]
+                    #[cfg(feature = "rustls-tls-native-roots-no-provider")]
                     if config.tls_built_in_certs_native {
                         let mut valid_count = 0;
                         let mut invalid_count = 0;
-                        for cert in rustls_native_certs::load_native_certs()
-                            .map_err(crate::error::builder)?
-                        {
+
+                        let load_results = rustls_native_certs::load_native_certs();
+                        for cert in load_results.certs {
                             // Continue on parsing errors, as native stores often include ancient or syntactically
                             // invalid certificates, like root certificates without any X509 extensions.
                             // Inspiration: https://github.com/rustls/rustls/blob/633bf4ba9d9521a95f68766d04c22e2b01e68318/rustls/src/anchors.rs#L105-L112
@@ -532,9 +539,21 @@ impl ClientBuilder {
                             }
                         }
                         if valid_count == 0 && invalid_count > 0 {
-                            return Err(crate::error::builder(
-                                "zero valid certificates found in native root store",
-                            ));
+                            let err = if load_results.errors.is_empty() {
+                                crate::error::builder(
+                                    "zero valid certificates found in native root store",
+                                )
+                            } else {
+                                use std::fmt::Write as _;
+                                let mut acc = String::new();
+                                for err in load_results.errors {
+                                    let _ = writeln!(&mut acc, "{err}");
+                                }
+
+                                crate::error::builder(acc)
+                            };
+
+                            return Err(err);
                         }
                     }
 
@@ -578,10 +597,45 @@ impl ClientBuilder {
                         });
 
                     // Build TLS config
-                    let config_builder = rustls::ClientConfig::builder_with_provider(provider)
-                        .with_protocol_versions(&versions)
-                        .map_err(|_| crate::error::builder("invalid TLS versions"))?
-                        .with_root_certificates(root_cert_store);
+                    let signature_algorithms = provider.signature_verification_algorithms;
+                    let config_builder =
+                        rustls::ClientConfig::builder_with_provider(provider.clone())
+                            .with_protocol_versions(&versions)
+                            .map_err(|_| crate::error::builder("invalid TLS versions"))?;
+
+                    let config_builder = if !config.certs_verification {
+                        config_builder
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                    } else if !config.hostname_verification {
+                        config_builder
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(IgnoreHostname::new(
+                                root_cert_store,
+                                signature_algorithms,
+                            )))
+                    } else {
+                        if config.crls.is_empty() {
+                            config_builder.with_root_certificates(root_cert_store)
+                        } else {
+                            let crls = config
+                                .crls
+                                .iter()
+                                .map(|e| e.as_rustls_crl())
+                                .collect::<Vec<_>>();
+                            let verifier =
+                                rustls::client::WebPkiServerVerifier::builder_with_provider(
+                                    Arc::new(root_cert_store),
+                                    provider,
+                                )
+                                .with_crls(crls)
+                                .build()
+                                .map_err(|_| {
+                                    crate::error::builder("invalid TLS verification settings")
+                                })?;
+                            config_builder.with_webpki_verifier(verifier)
+                        }
+                    };
 
                     // Finalize TLS config
                     let mut tls = if let Some(id) = config.identity {
@@ -589,12 +643,6 @@ impl ClientBuilder {
                     } else {
                         config_builder.with_no_client_auth()
                     };
-
-                    // Certificate verifier
-                    if !config.certs_verification {
-                        tls.dangerous()
-                            .set_certificate_verifier(Arc::new(NoVerifier));
-                    }
 
                     tls.enable_sni = config.tls_sni;
 
@@ -697,6 +745,9 @@ impl ClientBuilder {
             if let Some(http2_max_frame_size) = config.http2_max_frame_size {
                 builder.http2_max_frame_size(http2_max_frame_size);
             }
+            if let Some(http2_max_header_list_size) = config.http2_max_header_list_size {
+                builder.http2_max_header_list_size(http2_max_header_list_size);
+            }
             if let Some(http2_keep_alive_interval) = config.http2_keep_alive_interval {
                 builder.http2_keep_alive_interval(http2_keep_alive_interval);
             }
@@ -708,8 +759,8 @@ impl ClientBuilder {
             }
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         builder.timer(hyper_util::rt::TokioTimer::new());
+        builder.pool_timer(hyper_util::rt::TokioTimer::new());
         builder.pool_idle_timeout(config.pool_idle_timeout);
         builder.pool_max_idle_per_host(config.pool_max_idle_per_host);
         connector.set_keepalive(config.tcp_keepalive);
@@ -1264,6 +1315,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets the maximum size of received header frames for HTTP2.
+    ///
+    /// Default is currently 16KB, but can change.
+    #[cfg(feature = "http2")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+    pub fn http2_max_header_list_size(mut self, max_header_size_bytes: u32) -> ClientBuilder {
+        self.config.http2_max_header_list_size = Some(max_header_size_bytes);
+        self
+    }
+
     /// Sets an interval for HTTP2 Ping frames should be sent to keep a connection alive.
     ///
     /// Pass `None` to disable HTTP2 keep-alive.
@@ -1388,6 +1449,35 @@ impl ClientBuilder {
         self
     }
 
+    /// Add a certificate revocation list.
+    ///
+    ///
+    /// # Optional
+    ///
+    /// This requires the `rustls-tls(-...)` Cargo feature enabled.
+    #[cfg(feature = "__rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls")))]
+    pub fn add_crl(mut self, crl: CertificateRevocationList) -> ClientBuilder {
+        self.config.crls.push(crl);
+        self
+    }
+
+    /// Add multiple certificate revocation lists.
+    ///
+    ///
+    /// # Optional
+    ///
+    /// This requires the `rustls-tls(-...)` Cargo feature enabled.
+    #[cfg(feature = "__rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls")))]
+    pub fn add_crls(
+        mut self,
+        crls: impl IntoIterator<Item = CertificateRevocationList>,
+    ) -> ClientBuilder {
+        self.config.crls.extend(crls);
+        self
+    }
+
     /// Controls the use of built-in/preloaded certificates during certificate validation.
     ///
     /// Defaults to `true` -- built-in system certs will be used.
@@ -1417,12 +1507,12 @@ impl ClientBuilder {
     pub fn tls_built_in_root_certs(mut self, tls_built_in_root_certs: bool) -> ClientBuilder {
         self.config.tls_built_in_root_certs = tls_built_in_root_certs;
 
-        #[cfg(feature = "rustls-tls-webpki-roots")]
+        #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
         {
             self.config.tls_built_in_certs_webpki = tls_built_in_root_certs;
         }
 
-        #[cfg(feature = "rustls-tls-native-roots")]
+        #[cfg(feature = "rustls-tls-native-roots-no-provider")]
         {
             self.config.tls_built_in_certs_native = tls_built_in_root_certs;
         }
@@ -1433,8 +1523,8 @@ impl ClientBuilder {
     /// Sets whether to load webpki root certs with rustls.
     ///
     /// If the feature is enabled, this value is `true` by default.
-    #[cfg(feature = "rustls-tls-webpki-roots")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-webpki-roots")))]
+    #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-webpki-roots-no-provider")))]
     pub fn tls_built_in_webpki_certs(mut self, enabled: bool) -> ClientBuilder {
         self.config.tls_built_in_certs_webpki = enabled;
         self
@@ -1443,8 +1533,8 @@ impl ClientBuilder {
     /// Sets whether to load native root certs with rustls.
     ///
     /// If the feature is enabled, this value is `true` by default.
-    #[cfg(feature = "rustls-tls-native-roots")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-native-roots")))]
+    #[cfg(feature = "rustls-tls-native-roots-no-provider")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-native-roots-no-provider")))]
     pub fn tls_built_in_native_certs(mut self, enabled: bool) -> ClientBuilder {
         self.config.tls_built_in_certs_native = enabled;
         self
@@ -1476,9 +1566,17 @@ impl ClientBuilder {
     ///
     /// # Optional
     ///
-    /// This requires the optional `native-tls` feature to be enabled.
-    #[cfg(feature = "native-tls")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "native-tls")))]
+    /// This requires the optional `default-tls`, `native-tls`, or `rustls-tls(-...)`
+    /// feature to be enabled.
+    #[cfg(feature = "__tls")]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(
+            feature = "default-tls",
+            feature = "native-tls",
+            feature = "rustls-tls"
+        )))
+    )]
     pub fn danger_accept_invalid_hostnames(
         mut self,
         accept_invalid_hostname: bool,
@@ -1706,14 +1804,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Enables the [hickory-dns](hickory_resolver) async resolver instead of a default threadpool
-    /// using `getaddrinfo`.
-    ///
-    /// If the `hickory-dns` feature is turned on, the default option is enabled.
-    ///
-    /// # Optional
-    ///
-    /// This requires the optional `hickory-dns` feature to be enabled
+    #[doc(hidden)]
     #[cfg(feature = "hickory-dns")]
     #[cfg_attr(docsrs, doc(cfg(feature = "hickory-dns")))]
     #[deprecated(note = "use `hickory_dns` instead")]
@@ -1730,6 +1821,11 @@ impl ClientBuilder {
     /// # Optional
     ///
     /// This requires the optional `hickory-dns` feature to be enabled
+    ///
+    /// # Warning
+    ///
+    /// The hickory resolver does not work exactly the same, or on all the platforms
+    /// that the default resolver does
     #[cfg(feature = "hickory-dns")]
     #[cfg_attr(docsrs, doc(cfg(feature = "hickory-dns")))]
     pub fn hickory_dns(mut self, enable: bool) -> ClientBuilder {
@@ -1737,22 +1833,10 @@ impl ClientBuilder {
         self
     }
 
-    /// Disables the hickory-dns async resolver.
-    ///
-    /// This method exists even if the optional `hickory-dns` feature is not enabled.
-    /// This can be used to ensure a `Client` doesn't use the hickory-dns async resolver
-    /// even if another dependency were to enable the optional `hickory-dns` feature.
+    #[doc(hidden)]
     #[deprecated(note = "use `no_hickory_dns` instead")]
     pub fn no_trust_dns(self) -> ClientBuilder {
-        #[cfg(feature = "hickory-dns")]
-        {
-            self.hickory_dns(false)
-        }
-
-        #[cfg(not(feature = "hickory-dns"))]
-        {
-            self
-        }
+        self.no_hickory_dns()
     }
 
     /// Disables the hickory-dns async resolver.
@@ -2243,7 +2327,7 @@ impl Config {
             f.field("tcp_nodelay", &true);
         }
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(feature = "__tls")]
         {
             if !self.hostname_verification {
                 f.field("danger_accept_invalid_hostnames", &true);

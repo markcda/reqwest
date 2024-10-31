@@ -211,7 +211,12 @@ impl RequestBuilder {
             match <HeaderName as TryFrom<K>>::try_from(key) {
                 Ok(key) => match <HeaderValue as TryFrom<V>>::try_from(value) {
                     Ok(mut value) => {
-                        value.set_sensitive(sensitive);
+                        // We want to potentially make an unsensitive header
+                        // to be sensitive, not the reverse. So, don't turn off
+                        // a previously sensitive header.
+                        if sensitive {
+                            value.set_sensitive(true);
+                        }
                         req.headers_mut().append(key, value);
                     }
                     Err(e) => error = Some(crate::error::builder(e.into())),
@@ -505,59 +510,6 @@ impl RequestBuilder {
                     if !req.headers().contains_key(CONTENT_TYPE) {
                         req.headers_mut()
                             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                    }
-                    *req.body_mut() = Some(body.into());
-                }
-                Err(err) => error = Some(crate::error::builder(err)),
-            }
-        }
-        if let Some(err) = error {
-            self.request = Err(err);
-        }
-        self
-    }
-
-    /// Send a MessagePack body.
-    ///
-    /// Sets the body to the MsgPack serialization of the passed value, and
-    /// also sets the `Content-Type: application/msgpack` header.
-    ///
-    /// # Optional
-    ///
-    /// This requires the optional `msgpack` feature enabled.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use reqwest::Error;
-    /// # use std::collections::HashMap;
-    /// #
-    /// # fn run() -> Result<(), Error> {
-    /// let mut map = HashMap::new();
-    /// map.insert("lang", "rust");
-    ///
-    /// let client = reqwest::blocking::Client::new();
-    /// let res = client.post("http://httpbin.org")
-    ///     .msgpack(&map)
-    ///     .send()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Serialization can fail if `T`'s implementation of `Serialize` decides to
-    /// fail, or if `T` contains a map with non-string keys.
-    #[cfg(feature = "msgpack")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "msgpack")))]
-    pub fn msgpack<T: Serialize + ?Sized>(mut self, msgpack: &T) -> RequestBuilder {
-        let mut error = None;
-        if let Ok(ref mut req) = self.request {
-            match rmp_serde::to_vec(msgpack) {
-                Ok(body) => {
-                    if !req.headers().contains_key(CONTENT_TYPE) {
-                        req.headers_mut()
-                          .insert(CONTENT_TYPE, HeaderValue::from_static("application/msgpack"));
                     }
                     *req.body_mut() = Some(body.into());
                 }
