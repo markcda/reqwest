@@ -19,6 +19,8 @@ use super::wait;
 use crate::dns::Resolve;
 #[cfg(feature = "__tls")]
 use crate::tls;
+#[cfg(feature = "__rustls")]
+use crate::tls::CertificateRevocationList;
 #[cfg(feature = "__tls")]
 use crate::Certificate;
 #[cfg(any(feature = "native-tls", feature = "__rustls"))]
@@ -500,6 +502,15 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http2_max_frame_size(sz))
     }
 
+    /// Sets the maximum size of received header frames for HTTP2.
+    ///
+    /// Default is currently 16KB, but can change.
+    #[cfg(feature = "http2")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+    pub fn http2_max_header_list_size(self, max_header_size_bytes: u32) -> ClientBuilder {
+        self.with_inner(|inner| inner.http2_max_header_list_size(max_header_size_bytes))
+    }
+
     /// This requires the optional `http3` feature to be
     /// enabled.
     #[cfg(feature = "http3")]
@@ -606,6 +617,33 @@ impl ClientBuilder {
         self.with_inner(move |inner| inner.add_root_certificate(cert))
     }
 
+    /// Add a certificate revocation list.
+    ///
+    ///
+    /// # Optional
+    ///
+    /// This requires the `rustls-tls(-...)` Cargo feature enabled.
+    #[cfg(feature = "__rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls")))]
+    pub fn add_crl(self, crl: CertificateRevocationList) -> ClientBuilder {
+        self.with_inner(move |inner| inner.add_crl(crl))
+    }
+
+    /// Add multiple certificate revocation lists.
+    ///
+    ///
+    /// # Optional
+    ///
+    /// This requires the `rustls-tls(-...)` Cargo feature enabled.
+    #[cfg(feature = "__rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls")))]
+    pub fn add_crls(
+        self,
+        crls: impl IntoIterator<Item = CertificateRevocationList>,
+    ) -> ClientBuilder {
+        self.with_inner(move |inner| inner.add_crls(crls))
+    }
+
     /// Controls the use of built-in system certificates during certificate validation.
     ///
     /// Defaults to `true` -- built-in system certs will be used.
@@ -630,8 +668,8 @@ impl ClientBuilder {
     /// Sets whether to load webpki root certs with rustls.
     ///
     /// If the feature is enabled, this value is `true` by default.
-    #[cfg(feature = "rustls-tls-webpki-roots")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-webpki-roots")))]
+    #[cfg(feature = "rustls-tls-webpki-roots-no-provider")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-webpki-roots-no-provider")))]
     pub fn tls_built_in_webpki_certs(self, enabled: bool) -> ClientBuilder {
         self.with_inner(move |inner| inner.tls_built_in_webpki_certs(enabled))
     }
@@ -639,8 +677,8 @@ impl ClientBuilder {
     /// Sets whether to load native root certs with rustls.
     ///
     /// If the feature is enabled, this value is `true` by default.
-    #[cfg(feature = "rustls-tls-native-roots")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-native-roots")))]
+    #[cfg(feature = "rustls-tls-native-roots-no-provider")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls-native-roots-no-provider")))]
     pub fn tls_built_in_native_certs(self, enabled: bool) -> ClientBuilder {
         self.with_inner(move |inner| inner.tls_built_in_native_certs(enabled))
     }
@@ -670,9 +708,17 @@ impl ClientBuilder {
     ///
     /// # Optional
     ///
-    /// This requires the optional `native-tls` feature to be enabled.
-    #[cfg(feature = "native-tls")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "native-tls")))]
+    /// This requires the optional `default-tls`, `native-tls`, or `rustls-tls(-...)`
+    /// feature to be enabled.
+    #[cfg(feature = "__tls")]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(
+            feature = "default-tls",
+            feature = "native-tls",
+            feature = "rustls-tls"
+        )))
+    )]
     pub fn danger_accept_invalid_hostnames(self, accept_invalid_hostname: bool) -> ClientBuilder {
         self.with_inner(|inner| inner.danger_accept_invalid_hostnames(accept_invalid_hostname))
     }
