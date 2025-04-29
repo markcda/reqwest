@@ -14,7 +14,7 @@ use wasm_bindgen::JsCast;
 #[cfg(feature = "stream")]
 use futures_util::stream::{self, StreamExt};
 
-#[cfg(feature = "json")]
+#[cfg(any(feature = "json", feature = "msgpack"))]
 use serde::de::DeserializeOwned;
 
 /// A Response to a submitted `Request`.
